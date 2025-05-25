@@ -248,8 +248,7 @@ func handleAutoReply(evt *events.Message) {
 
 func handleWebhookForward(ctx context.Context, evt *events.Message) {
 	if len(config.WhatsappWebhook) > 0 &&
-		!strings.Contains(evt.Info.SourceString(), "broadcast") &&
-		!isFromMySelf(evt.Info.SourceString()) {
+		!strings.Contains(evt.Info.SourceString(), "broadcast") {
 		go func(evt *events.Message) {
 			if err := forwardToWebhook(ctx, evt); err != nil {
 				logrus.Error("Failed forward to webhook: ", err)
