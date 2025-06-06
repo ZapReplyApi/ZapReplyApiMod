@@ -5,8 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/helpers"
@@ -19,10 +22,11 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/template/html/v2"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.mau.fi/whatsmeow/types"
 )
 
-// rootCmd represents the base command when called without any subcommands
 var restCmd = &cobra.Command{
 	Use:   "rest",
 	Short: "Send whatsapp API over http",
@@ -33,8 +37,14 @@ var restCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(restCmd)
 }
+
+var (
+	// Cache para evitar múltiplos webhooks para o mesmo call_id e JID
+	callWebhookCache = sync.Map{}
+	cacheTTL         = 5 * time.Minute
+)
+
 func restServer(_ *cobra.Command, _ []string) {
-	//preparing folder if not exist
 	err := utils.CreateFolder(config.PathQrCode, config.PathSendItems, config.PathStorages, config.PathMedia)
 	if err != nil {
 		log.Fatalln(err)
@@ -86,7 +96,132 @@ func restServer(_ *cobra.Command, _ []string) {
 		}))
 	}
 
-	// Rest
+	app.Post("/send-presence", func(c *fiber.Ctx) error {
+		var request struct {
+			JID      string `json:"jid"`
+			Presence string `json:"presence"`
+			Duration int64  `json:"duration"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.JID == "" || request.Presence == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "jid and presence are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.JID)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid JID: %v", err)})
+		}
+
+		var presence types.ChatPresence
+		var media types.ChatPresenceMedia
+		switch request.Presence {
+		case "typing":
+			presence = types.ChatPresenceComposing
+			media = types.ChatPresenceMediaText
+		case "recording":
+			presence = types.ChatPresenceComposing
+			media = types.ChatPresenceMediaAudio
+		default:
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid presence type, must be 'typing' or 'recording'"})
+		}
+
+		err = waCli.SendChatPresence(jid, presence, media)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send presence: %v", err)})
+		}
+
+		if request.Duration > 0 {
+			go func() {
+				time.Sleep(time.Duration(request.Duration) * time.Second)
+				if err := waCli.SendChatPresence(jid, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
+					logrus.Errorf("Failed to send paused presence: %v", err)
+				}
+			}()
+		}
+
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Presence %s sent to %s", request.Presence, request.JID)})
+	})
+
+	app.Post("/call-ended", func(c *fiber.Ctx) error {
+		var request struct {
+			CallID string `json:"call_id"`
+			JID    string `json:"jid"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.CallID == "" || request.JID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "call_id and jid are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.JID)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid JID: %v", err)})
+		}
+
+		// Chave única para cache
+		cacheKey := request.CallID + ":" + request.JID
+		// Verifica se já foi processado
+		if _, exists := callWebhookCache.LoadOrStore(cacheKey, time.Now()); exists {
+			logrus.Infof("Webhook para call_id %s e JID %s já enviado, ignorando", request.CallID, request.JID)
+			return c.JSON(fiber.Map{
+				"status":  "call rejected (already processed)",
+				"call_id": request.CallID,
+				"jid":     request.JID,
+			})
+		}
+
+		// Expira a entrada após cacheTTL
+		go func() {
+			time.Sleep(cacheTTL)
+			callWebhookCache.Delete(cacheKey)
+		}()
+
+		err = waCli.RejectCall(jid, request.CallID)
+		if err != nil {
+			callWebhookCache.Delete(cacheKey) // Remove da cache em caso de erro
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to reject call: %v", err)})
+		}
+
+		if len(config.WhatsappWebhook) > 0 {
+			go func() {
+				payload := map[string]interface{}{
+					"from":      request.JID,
+					"call_id":   request.CallID,
+					"type":      "call_received",
+					"status":    "rejected",
+					"timestamp": time.Now().Format(time.RFC3339),
+					"IsGroup":   false,
+				}
+				for _, url := range config.WhatsappWebhook {
+					if err := whatsapp.SubmitWebhook(payload, url); err != nil {
+						logrus.Errorf("Failed to send call rejected webhook: %v", err)
+					}
+				}
+			}()
+		}
+
+		return c.JSON(fiber.Map{
+			"status":  "call rejected",
+			"call_id": request.CallID,
+			"jid":     request.JID,
+		})
+	})
+
 	rest.InitRestApp(app, appUsecase)
 	rest.InitRestSend(app, sendUsecase)
 	rest.InitRestUser(app, userUsecase)
@@ -107,11 +242,8 @@ func restServer(_ *cobra.Command, _ []string) {
 	websocket.RegisterRoutes(app, appUsecase)
 	go websocket.RunHub()
 
-	// Set auto reconnect to whatsapp server after booting
 	go helpers.SetAutoConnectAfterBooting(appUsecase)
-	// Set auto reconnect checking
 	go helpers.SetAutoReconnectChecking(whatsappCli)
-	// Start auto flush chat csv
 	if config.WhatsappChatStorage {
 		go helpers.StartAutoFlushChatStorage()
 	}
