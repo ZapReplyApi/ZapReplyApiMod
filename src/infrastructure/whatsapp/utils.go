@@ -144,6 +144,7 @@ func IsOnWhatsapp(waCli *whatsmeow.Client, jid string) bool {
 			return false
 		}
 		for _, v := range data {
+			logrus.Info("User ", jid, " is on WhatsApp: ", v.IsIn)
 			if !v.IsIn {
 				return false
 			}
@@ -241,19 +242,9 @@ func ExtractMessageText(evt *events.Message) string {
 			messageText = "🎥 " + messageText
 		}
 	} else if liveLocationMessage := evt.Message.GetLiveLocationMessage(); liveLocationMessage != nil {
-		messageText = liveLocationMessage.GetCaption()
-		if messageText == "" {
-			messageText = "📍 Live Location"
-		} else {
-			messageText = "📍 " + messageText
-		}
+		messageText = "📍 Live Location"
 	} else if locationMessage := evt.Message.GetLocationMessage(); locationMessage != nil {
-		messageText = locationMessage.GetName()
-		if messageText == "" {
-			messageText = "📍 Location"
-		} else {
-			messageText = "📍 " + messageText
-		}
+		messageText = "📍 Location"
 	} else if stickerMessage := evt.Message.GetStickerMessage(); stickerMessage != nil {
 		messageText = "🎨 Sticker"
 		if stickerMessage.GetIsAnimated() {
