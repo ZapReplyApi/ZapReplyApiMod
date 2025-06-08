@@ -11,11 +11,10 @@ import (
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	pkgError "github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/error"
-	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/sirupsen/logrus"
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/appstate"
-	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -113,6 +112,231 @@ func GetGroupName(ctx context.Context, jid types.JID) (string, error) {
 	return groupInfo.GroupName.Name, nil
 }
 
+func SendAudioMessage(ctx context.Context, jid types.JID, audioData []byte, mimeType string) error {
+	if cli == nil {
+		logrus.Error("WhatsApp client is nil")
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
+	if !cli.IsConnected() {
+		logrus.Error("WhatsApp client not connected")
+		return fmt.Errorf("WhatsApp client not connected")
+	}
+
+	if !cli.IsLoggedIn() {
+		logrus.Error("WhatsApp client not logged in")
+		return fmt.Errorf("WhatsApp client not logged in")
+	}
+
+	if int64(len(audioData)) > config.WhatsappSettingMaxFileSize {
+		return fmt.Errorf("audio size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)
+	}
+
+	upload, err := cli.Upload(ctx, audioData, whatsmeow.MediaAudio)
+	if err != nil {
+		logrus.Errorf("Upload failed: %v, Data length: %d", err, len(audioData))
+		return fmt.Errorf("failed to upload audio: %v", err)
+	}
+
+	msg := &waProto.Message{
+		AudioMessage: &waProto.AudioMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           proto.String(string(upload.URL)),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(audioData))),
+			PTT:           proto.Bool(false),
+		},
+	}
+
+	_, err = cli.SendMessage(ctx, jid, msg)
+	if err != nil {
+		logrus.Errorf("Failed to send audio message to %s: %v", jid.String(), err)
+		return err
+	}
+	logrus.Infof("Audio message sent successfully to %s", jid.String())
+	return nil
+}
+
+func SendDocumentMessage(ctx context.Context, jid types.JID, documentData []byte, mimeType, fileName, caption string) error {
+	if cli == nil {
+		logrus.Error("WhatsApp client is nil")
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
+	if !cli.IsConnected() {
+		logrus.Error("WhatsApp client not connected")
+		return fmt.Errorf("WhatsApp client not connected")
+	}
+
+	if !cli.IsLoggedIn() {
+		logrus.Error("WhatsApp client not logged in")
+		return fmt.Errorf("WhatsApp client not logged in")
+	}
+
+	if int64(len(documentData)) > config.WhatsappSettingMaxFileSize {
+		return fmt.Errorf("document size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)
+	}
+
+	upload, err := cli.Upload(ctx, documentData, whatsmeow.MediaDocument)
+	if err != nil {
+		logrus.Errorf("Upload failed: %v, Data length: %d", err, len(documentData))
+		return fmt.Errorf("failed to upload document: %v", err)
+	}
+
+	msg := &waProto.Message{
+		DocumentMessage: &waProto.DocumentMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           proto.String(string(upload.URL)),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(documentData))),
+			FileName:      proto.String(fileName),
+			Caption:       proto.String(caption),
+		},
+	}
+
+	_, err = cli.SendMessage(ctx, jid, msg)
+	if err != nil {
+		logrus.Errorf("Failed to send document message to %s: %v", jid.String(), err)
+		return err
+	}
+	logrus.Infof("Document message sent successfully to %s", jid.String())
+	return nil
+}
+
+func SendVideoMessage(ctx context.Context, jid types.JID, videoData []byte, mimeType, fileName, caption string) error {
+	if cli == nil {
+		logrus.Error("WhatsApp client is nil")
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
+	if !cli.IsConnected() {
+		logrus.Error("WhatsApp client not connected")
+		return fmt.Errorf("WhatsApp client not connected")
+	}
+
+	if !cli.IsLoggedIn() {
+		logrus.Error("WhatsApp client not logged in")
+		return fmt.Errorf("WhatsApp client not logged in")
+	}
+
+	if int64(len(videoData)) > config.WhatsappSettingMaxVideoSize {
+		return fmt.Errorf("video size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxVideoSize)
+	}
+
+	upload, err := cli.Upload(ctx, videoData, whatsmeow.MediaVideo)
+	if err != nil {
+		logrus.Errorf("Upload failed: %v, Data length: %d", err, len(videoData))
+		return fmt.Errorf("failed to upload video: %v", err)
+	}
+
+	msg := &waProto.Message{
+		VideoMessage: &waProto.VideoMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           proto.String(string(upload.URL)),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(videoData))),
+			Caption:       proto.String(caption),
+		},
+	}
+
+	_, err = cli.SendMessage(ctx, jid, msg)
+	if err != nil {
+		logrus.Errorf("Failed to send video message to %s: %v", jid.String(), err)
+		return err
+	}
+	logrus.Infof("Video message sent successfully to %s", jid.String())
+	return nil
+}
+
+func SendImageMessage(ctx context.Context, jid types.JID, imageData []byte, mimeType, fileName, caption string) error {
+	if cli == nil {
+		logrus.Error("WhatsApp client is nil")
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
+	if !cli.IsConnected() {
+		logrus.Error("WhatsApp client not connected")
+		return fmt.Errorf("WhatsApp client not connected")
+	}
+
+	if !cli.IsLoggedIn() {
+		logrus.Error("WhatsApp client not logged in")
+		return fmt.Errorf("WhatsApp client not logged in")
+	}
+
+	if int64(len(imageData)) > config.WhatsappSettingMaxFileSize {
+		return fmt.Errorf("image size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)
+	}
+
+	upload, err := cli.Upload(ctx, imageData, whatsmeow.MediaImage)
+	if err != nil {
+		logrus.Errorf("Upload failed: %v, Data length: %d", err, len(imageData))
+		return fmt.Errorf("failed to upload image: %v", err)
+	}
+
+	msg := &waProto.Message{
+		ImageMessage: &waProto.ImageMessage{
+			Mimetype:      proto.String(mimeType),
+			URL:           proto.String(string(upload.URL)),
+			DirectPath:    proto.String(upload.DirectPath),
+			MediaKey:      upload.MediaKey,
+			FileEncSHA256: upload.FileEncSHA256,
+			FileSHA256:    upload.FileSHA256,
+			FileLength:    proto.Uint64(uint64(len(imageData))),
+			Caption:       proto.String(caption),
+		},
+	}
+
+	_, err = cli.SendMessage(ctx, jid, msg)
+	if err != nil {
+		logrus.Errorf("Failed to send image message to %s: %v", jid.String(), err)
+		return err
+	}
+	logrus.Infof("Image message sent successfully to %s", jid.String())
+	return nil
+}
+
+func SendLocationMessage(ctx context.Context, jid types.JID, latitude, longitude float64) error {
+	if cli == nil {
+		logrus.Error("WhatsApp client is nil")
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
+	if !cli.IsConnected() {
+		logrus.Error("WhatsApp client not connected")
+		return fmt.Errorf("WhatsApp client not connected")
+	}
+
+	if !cli.IsLoggedIn() {
+		logrus.Error("WhatsApp client not logged in")
+		return fmt.Errorf("WhatsApp client not logged in")
+	}
+
+	msg := &waProto.Message{
+		LocationMessage: &waProto.LocationMessage{
+			DegreesLatitude:  proto.Float64(latitude),
+			DegreesLongitude: proto.Float64(longitude),
+		},
+	}
+
+	_, err := cli.SendMessage(ctx, jid, msg)
+	if err != nil {
+		logrus.Errorf("Failed to send location message to %s: %v", jid.String(), err)
+		return err
+	}
+	logrus.Infof("Location message sent successfully to %s", jid.String())
+	return nil
+}
+
 func handler(ctx context.Context, rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.DeleteForMe:
@@ -188,7 +412,7 @@ func handleMessage(ctx context.Context, evt *events.Message) {
 	)
 
 	message := ExtractMessageText(evt)
-	utils.RecordMessage(evt.Info.ID, evt.Info.Sender.String(), message)
+	RecordMessage(evt.Info.ID, evt.Info.Sender.String(), message)
 
 	handleImageMessage(ctx, evt)
 	handleAutoReply(evt)
@@ -251,7 +475,7 @@ func handleAutoReply(evt *events.Message) {
 		_, _ = cli.SendMessage(
 			context.Background(),
 			FormatJID(evt.Info.Sender.String()),
-			&waE2E.Message{Conversation: proto.String(config.WhatsappAutoReplyMessage)},
+			&waProto.Message{Conversation: proto.String(config.WhatsappAutoReplyMessage)},
 		)
 	}
 }
@@ -348,4 +572,8 @@ func buildForwarded(evt *events.Message) bool {
 		}
 	}
 	return false
+}
+
+func RecordMessage(id, sender, message string) {
+	// Placeholder para registro de mensagem, ajuste conforme necessário
 }
