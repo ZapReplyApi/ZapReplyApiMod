@@ -1,16 +1,19 @@
 package cmd
 
 import (
+	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
-	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/helpers"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/middleware"
@@ -39,13 +42,25 @@ func init() {
 }
 
 var (
-	// Cache para evitar múltiplos webhooks para o mesmo call_id e JID
+	// Cache para evitar múltiplos webhooks para o mesmo call_id e Phone
 	callWebhookCache = sync.Map{}
 	cacheTTL         = 5 * time.Minute
 )
 
 func restServer(_ *cobra.Command, _ []string) {
-	err := utils.CreateFolder(config.PathQrCode, config.PathSendItems, config.PathStorages, config.PathMedia)
+	err := os.MkdirAll(config.PathQrCode, 0755)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	err = os.MkdirAll(config.PathSendItems, 0755)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	err = os.MkdirAll(config.PathStorages, 0755)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	err = os.MkdirAll(config.PathMedia, 0755)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -98,7 +113,7 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	app.Post("/send-presence", func(c *fiber.Ctx) error {
 		var request struct {
-			JID      string `json:"jid"`
+			Phone    string `json:"Phone"`
 			Presence string `json:"presence"`
 			Duration int64  `json:"duration"`
 		}
@@ -106,8 +121,8 @@ func restServer(_ *cobra.Command, _ []string) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
-		if request.JID == "" || request.Presence == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "jid and presence are required"})
+		if request.Phone == "" || request.Presence == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and presence are required"})
 		}
 
 		waCli := whatsapp.GetWaCli()
@@ -115,9 +130,9 @@ func restServer(_ *cobra.Command, _ []string) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
 		}
 
-		jid, err := whatsapp.ParseJID(request.JID)
+		jid, err := whatsapp.ParseJID(request.Phone)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid JID: %v", err)})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
 		}
 
 		var presence types.ChatPresence
@@ -147,20 +162,20 @@ func restServer(_ *cobra.Command, _ []string) {
 			}()
 		}
 
-		return c.JSON(fiber.Map{"status": fmt.Sprintf("Presence %s sent to %s", request.Presence, request.JID)})
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Presence %s sent to %s", request.Presence, request.Phone)})
 	})
 
 	app.Post("/call-ended", func(c *fiber.Ctx) error {
 		var request struct {
 			CallID string `json:"call_id"`
-			JID    string `json:"jid"`
+			Phone  string `json:"Phone"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
-		if request.CallID == "" || request.JID == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "call_id and jid are required"})
+		if request.CallID == "" || request.Phone == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "call_id and Phone are required"})
 		}
 
 		waCli := whatsapp.GetWaCli()
@@ -168,20 +183,20 @@ func restServer(_ *cobra.Command, _ []string) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
 		}
 
-		jid, err := whatsapp.ParseJID(request.JID)
+		jid, err := whatsapp.ParseJID(request.Phone)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid JID: %v", err)})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
 		}
 
 		// Chave única para cache
-		cacheKey := request.CallID + ":" + request.JID
+		cacheKey := request.CallID + ":" + request.Phone
 		// Verifica se já foi processado
 		if _, exists := callWebhookCache.LoadOrStore(cacheKey, time.Now()); exists {
-			logrus.Infof("Webhook para call_id %s e JID %s já enviado, ignorando", request.CallID, request.JID)
+			logrus.Infof("Webhook para call_id %s e Phone %s já enviado, ignorando", request.CallID, request.Phone)
 			return c.JSON(fiber.Map{
 				"status":  "call rejected (already processed)",
 				"call_id": request.CallID,
-				"jid":     request.JID,
+				"Phone":   request.Phone,
 			})
 		}
 
@@ -200,12 +215,12 @@ func restServer(_ *cobra.Command, _ []string) {
 		if len(config.WhatsappWebhook) > 0 {
 			go func() {
 				payload := map[string]interface{}{
-					"from":      request.JID,
-					"call_id":   request.CallID,
-					"type":      "call_received",
-					"status":    "rejected",
-					"timestamp": time.Now().Format(time.RFC3339),
-					"IsGroup":   false,
+					"SenderNumber": request.Phone,
+					"Call_Id":      request.CallID,
+					"Type":         "call_received",
+					"Status_Call":       "rejected",
+					"timestamp":    time.Now().Format(time.RFC3339),
+					"IsGroup":      false,
 				}
 				for _, url := range config.WhatsappWebhook {
 					if err := whatsapp.SubmitWebhook(payload, url); err != nil {
@@ -218,8 +233,430 @@ func restServer(_ *cobra.Command, _ []string) {
 		return c.JSON(fiber.Map{
 			"status":  "call rejected",
 			"call_id": request.CallID,
-			"jid":     request.JID,
+			"Phone":   request.Phone,
 		})
+	})
+
+	app.Post("/chat/send/audio", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone string `json:"Phone"`
+			Media string `json:"media"` // Pode ser Base64 ou caminho do arquivo
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone is required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		var audioData []byte
+		var mimeType string
+
+		if strings.HasPrefix(request.Media, "data:audio/") || strings.Contains(request.Media, ",") {
+			parts := strings.SplitN(request.Media, ",", 2)
+			if len(parts) != 2 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid Base64 format"})
+			}
+			mimeType = strings.TrimPrefix(strings.Split(parts[0], ";")[0], "data:")
+			audioData, err = base64.StdEncoding.DecodeString(parts[1])
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Failed to decode Base64: %v", err)})
+			}
+		} else {
+			if _, err := os.Stat(request.Media); os.IsNotExist(err) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("File not found: %s", request.Media)})
+			}
+			audioData, err = os.ReadFile(request.Media)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to read file: %v", err)})
+			}
+			mimeType = determineMimeType(request.Media)
+			if mimeType == "" {
+				mimeType = http.DetectContentType(audioData)
+				logrus.Warnf("MIME type not detected by extension for file %s, auto-detected as %s", request.Media, mimeType)
+			}
+		}
+
+		if int64(len(audioData)) > config.WhatsappSettingMaxFileSize {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Audio size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)})
+		}
+
+		switch mimeType {
+		case "audio/opus", "audio/ogg":
+			mimeType = "audio/ogg"
+		case "audio/mpeg", "audio/mp3":
+			mimeType = "audio/mpeg"
+		case "audio/wav":
+			mimeType = "audio/wav"
+		case "audio/aac":
+			mimeType = "audio/aac"
+		default:
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Unsupported audio format: %s", mimeType)})
+		}
+		logrus.Infof("Detected MIME type for media: %s", mimeType)
+
+		tempPath := filepath.Join(config.PathMedia, fmt.Sprintf("temp_%s", filepath.Base(request.Media)))
+		if err := os.WriteFile(tempPath, audioData, 0644); err != nil {
+			logrus.Errorf("Failed to save temp file: %v", err)
+		} else {
+			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
+		}
+
+		err = whatsapp.SendAudioMessage(context.Background(), jid, audioData, mimeType)
+		if err != nil {
+			logrus.Errorf("Failed to send audio message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send audio message: %v", err)})
+		}
+		logrus.Infof("Audio message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Audio sent"})
+	})
+
+	app.Post("/chat/send/document", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone        string `json:"Phone"`
+			FileName     string `json:"FileName"`
+			Caption      string `json:"Caption"`
+			DocumentPath string `json:"DocumentPath"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.DocumentPath == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and DocumentPath are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		if _, err := os.Stat(request.DocumentPath); os.IsNotExist(err) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("File not found: %s", request.DocumentPath)})
+		}
+		documentData, err := os.ReadFile(request.DocumentPath)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to read file: %v", err)})
+		}
+
+		if int64(len(documentData)) > config.WhatsappSettingMaxFileSize {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Document size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)})
+		}
+
+		mimeType := determineMimeType(request.DocumentPath)
+		if mimeType == "" {
+			mimeType = http.DetectContentType(documentData)
+			logrus.Warnf("MIME type not detected by extension for file %s, auto-detected as %s", request.DocumentPath, mimeType)
+		}
+
+		tempPath := filepath.Join(config.PathMedia, fmt.Sprintf("temp_%s", request.FileName))
+		if err := os.WriteFile(tempPath, documentData, 0644); err != nil {
+			logrus.Errorf("Failed to save temp file: %v", err)
+		} else {
+			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
+		}
+
+		err = whatsapp.SendDocumentMessage(context.Background(), jid, documentData, mimeType, request.FileName, request.Caption)
+		if err != nil {
+			logrus.Errorf("Failed to send document message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send document message: %v", err)})
+		}
+		logrus.Infof("Document message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Document sent"})
+	})
+
+	app.Post("/chat/send/video", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			Caption   string `json:"Caption"`
+			VideoPath string `json:"VideoPath"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.VideoPath == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and VideoPath are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		if _, err := os.Stat(request.VideoPath); os.IsNotExist(err) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("File not found: %s", request.VideoPath)})
+		}
+		videoData, err := os.ReadFile(request.VideoPath)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to read file: %v", err)})
+		}
+
+		if int64(len(videoData)) > config.WhatsappSettingMaxVideoSize {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Video size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxVideoSize)})
+		}
+
+		mimeType := determineMimeType(request.VideoPath)
+		if mimeType == "" {
+			mimeType = http.DetectContentType(videoData)
+			logrus.Warnf("MIME type not detected by extension for file %s, auto-detected as %s", request.VideoPath, mimeType)
+		}
+
+		tempPath := filepath.Join(config.PathMedia, fmt.Sprintf("temp_%s", filepath.Base(request.VideoPath)))
+		if err := os.WriteFile(tempPath, videoData, 0644); err != nil {
+			logrus.Errorf("Failed to save temp file: %v", err)
+		} else {
+			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
+		}
+
+		err = whatsapp.SendVideoMessage(context.Background(), jid, videoData, mimeType, filepath.Base(request.VideoPath), request.Caption)
+		if err != nil {
+			logrus.Errorf("Failed to send video message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send video message: %v", err)})
+		}
+		logrus.Infof("Video message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Video sent"})
+	})
+
+	app.Post("/chat/send/image", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			Caption   string `json:"Caption"`
+			ImagePath string `json:"ImagePath"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.ImagePath == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and ImagePath are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		if _, err := os.Stat(request.ImagePath); os.IsNotExist(err) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("File not found: %s", request.ImagePath)})
+		}
+		imageData, err := os.ReadFile(request.ImagePath)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to read file: %v", err)})
+		}
+
+		if int64(len(imageData)) > config.WhatsappSettingMaxFileSize {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Image size exceeds the maximum limit of %d bytes", config.WhatsappSettingMaxFileSize)})
+		}
+
+		mimeType := determineMimeType(request.ImagePath)
+		if mimeType == "" {
+			mimeType = http.DetectContentType(imageData)
+			logrus.Warnf("MIME type not detected by extension for file %s, auto-detected as %s", request.ImagePath, mimeType)
+		}
+
+		tempPath := filepath.Join(config.PathMedia, fmt.Sprintf("temp_%s", filepath.Base(request.ImagePath)))
+		if err := os.WriteFile(tempPath, imageData, 0644); err != nil {
+			logrus.Errorf("Failed to save temp file: %v", err)
+		} else {
+			logrus.Infof("Temporary file saved at %s for debugging", tempPath)
+		}
+
+		err = whatsapp.SendImageMessage(context.Background(), jid, imageData, mimeType, filepath.Base(request.ImagePath), request.Caption)
+		if err != nil {
+			logrus.Errorf("Failed to send image message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send image message: %v", err)})
+		}
+		logrus.Infof("Image message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Image sent"})
+	})
+
+	app.Post("/chat/send/location", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string  `json:"Phone"`
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.Latitude == 0 || request.Longitude == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone, latitude, and longitude are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		err = whatsapp.SendLocationMessage(context.Background(), jid, request.Latitude, request.Longitude)
+		if err != nil {
+			logrus.Errorf("Failed to send location message to %s: %v", jid.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to send location message: %v", err)})
+		}
+		logrus.Infof("Location message sent successfully to %s", jid.String())
+
+		return c.JSON(fiber.Map{"status": "Location sent"})
+	})
+
+	// Endpoint: Deletar Mensagem (sem agendamento)
+	app.Post("/chat/delete-message", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			MessageID string `json:"message_id"`
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.MessageID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message_id are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		jid, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		messageID := types.MessageID(request.MessageID)
+		_, err = waCli.RevokeMessage(jid, messageID)
+		if err != nil {
+			logrus.Errorf("Failed to revoke message %s in chat %s: %v", messageID, jid.String(), err)
+			// Verifica se o erro é devido ao tempo limite do WhatsApp
+			if strings.Contains(err.Error(), "too old") || strings.Contains(err.Error(), "not allowed") {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Message deletion not allowed: likely too old or not sent by you"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to revoke message: %v", err)})
+		}
+		logrus.Infof("Message %s revoked successfully in chat %s", messageID, jid.String())
+
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s deleted", messageID)})
+	})
+
+	// Endpoint: Marcar Mensagem como Lida (corrigido e com depuração)
+	app.Post("/chat/mark-read", func(c *fiber.Ctx) error {
+		var request struct {
+			Phone     string `json:"Phone"`
+			MessageID string `json:"message_id"`
+			Sender    string `json:"sender"` // Obrigatório para grupos
+			Played    bool   `json:"played"` // true para marcar como reproduzida (voz)
+		}
+		if err := c.BodyParser(&request); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+
+		if request.Phone == "" || request.MessageID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Phone and message_id are required"})
+		}
+
+		waCli := whatsapp.GetWaCli()
+		if waCli == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not initialized"})
+		}
+
+		if !waCli.IsConnected() || !waCli.IsLoggedIn() {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WhatsApp client not connected or logged in"})
+		}
+
+		chatJID, err := whatsapp.ParseJID(request.Phone)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid Phone: %v", err)})
+		}
+
+		var senderJID types.JID
+		if request.Sender != "" {
+			senderJID, err = whatsapp.ParseJID(request.Sender)
+			if err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("Invalid sender JID: %v", err)})
+			}
+		} else if strings.Contains(chatJID.String(), "@g.us") {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Sender is required for group chats"})
+		}
+
+		messageID := types.MessageID(request.MessageID)
+		timestamp := time.Now()
+
+		var receiptTypeExtra []types.ReceiptType
+		if request.Played {
+			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypePlayed)
+		} else {
+			receiptTypeExtra = append(receiptTypeExtra, types.ReceiptTypeRead)
+		}
+
+		logrus.Debugf("Marking message %s as read in chat %s with sender %s, played: %v", messageID, chatJID.String(), senderJID.String(), request.Played)
+		err = waCli.MarkRead([]types.MessageID{messageID}, timestamp, chatJID, senderJID, receiptTypeExtra...)
+		if err != nil {
+			logrus.Errorf("Failed to mark message %s as read in chat %s: %v", messageID, chatJID.String(), err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("Failed to mark message as read: %v", err)})
+		}
+		logrus.Infof("Message %s marked as read in chat %s", messageID, chatJID.String())
+
+		return c.JSON(fiber.Map{"status": fmt.Sprintf("Message %s marked as read", messageID)})
 	})
 
 	rest.InitRestApp(app, appUsecase)
@@ -250,5 +687,38 @@ func restServer(_ *cobra.Command, _ []string) {
 
 	if err = app.Listen(":" + config.AppPort); err != nil {
 		log.Fatalln("Failed to start: ", err.Error())
+	}
+}
+
+// determineMimeType é uma função auxiliar para determinar o MIME type manualmente
+func determineMimeType(filename string) string {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	switch ext {
+	case "mp3":
+		return "audio/mpeg"
+	case "ogg":
+		return "audio/ogg"
+	case "wav":
+		return "audio/wav"
+	case "aac":
+		return "audio/aac"
+	case "opus":
+		return "audio/opus"
+	case "mp4":
+		return "video/mp4"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "png":
+		return "image/png"
+	case "gif":
+		return "image/gif"
+	case "pdf":
+		return "application/pdf"
+	case "doc", "docx":
+		return "application/msword"
+	case "xls", "xlsx":
+		return "application/vnd.ms-excel"
+	default:
+		return ""
 	}
 }
