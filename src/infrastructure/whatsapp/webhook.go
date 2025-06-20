@@ -42,13 +42,18 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	body := make(map[string]interface{})
 
 	if from := evt.Info.SourceString(); from != "" {
-		body["from"] = from
+		body["SenderNumber"] = from
 	}
 	if message.ID != "" {
-		body["message"] = message
+		body["message"] = map[string]interface{}{
+			"ID":            message.ID,
+			"TextMessage":   message.Text,
+			"RepliedId":     message.RepliedId,
+			"MessageOrigin": message.QuotedMessage,
+		}
 	}
 	if pushname := evt.Info.PushName; pushname != "" {
-		body["pushname"] = pushname
+		body["PushName"] = pushname
 	}
 	if waReaction.Message != "" {
 		body["reaction"] = waReaction
@@ -86,7 +91,10 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	}
 	body["MyNumber"] = MyNumber
 
-	body["type"] = determineMessageType(evt, message.Text)
+	body["Type"] = determineMessageType(evt, message.Text)
+
+	// Adiciona a porta configurada no payload
+	body["Port"] = config.AppPort
 
 	if audioMedia := evt.Message.GetAudioMessage(); audioMedia != nil {
 		path, err := ExtractMedia(ctx, config.PathMedia, audioMedia)
@@ -99,8 +107,8 @@ func createPayload(ctx context.Context, evt *events.Message) (map[string]interfa
 	if contactMessage := evt.Message.GetContactMessage(); contactMessage != nil {
 		body["contact"] = contactMessage
 	}
-	if documentMedia := evt.Message.GetDocumentMessage(); documentMedia != nil {
-		path, err := ExtractMedia(ctx, config.PathMedia, documentMedia)
+	if documentMessage := evt.Message.GetDocumentMessage(); documentMessage != nil {
+		path, err := ExtractMedia(ctx, config.PathMedia, documentMessage)
 		if err != nil {
 			logrus.Errorf("Failed to download document: %v", err)
 			return nil, pkgError.WebhookError(fmt.Sprintf("Failed to download document: %v", err))
